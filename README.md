@@ -16,7 +16,7 @@
 - 🔍 **5 MCP Tools** for vulnerability search, CVE details, critical CVE tracking, KEV monitoring, and EPSS scoring
 - 🔄 **Automated Background Sync** — NVD delta (2h), CISA KEV (12h), EPSS batch (24h) via APScheduler
 - 💾 **SQLite + FTS5** — Full-text search with 67K+ pre-loaded CVE records
-- 🚀 **Dual Transport** — `stdio` for local IDE agents, `sse` on port 8001 for network agents
+- 🚀 **Triple Transport** — `stdio` for local IDE agents, `sse` + `streamable-http` on port 8001 for network agents
 - 🐳 **Docker Ready** — Multi-stage build with non-root user
 
 ## Quick Start
@@ -42,15 +42,21 @@ uv sync
 # stdio mode (for Claude Desktop, Claude Code)
 uv run vulnscan-mcp --transport stdio
 
-# SSE mode on port 8001 (for Cursor, remote agents)
+# Network mode on port 8001 — serves both SSE and Streamable HTTP simultaneously
 uv run vulnscan-mcp --transport sse --port 8001
 ```
+
+When running in network mode, the server exposes:
+- **SSE** at `/sse` (+ `/messages` for POST)
+- **Streamable HTTP** at `/mcp`
+- **Health check** at `/`
 
 ### Docker
 
 ```bash
 docker compose up -d
-# Server available at http://localhost:8001/sse
+# SSE endpoint:              http://localhost:8001/sse
+# Streamable HTTP endpoint:  http://localhost:8001/mcp
 ```
 
 ## MCP Tools
@@ -85,7 +91,7 @@ docker compose up -d
 }
 ```
 
-### Cursor / Remote Agents (SSE on Port 8001)
+### Cursor / Remote Agents (SSE)
 
 ```bash
 docker run -d -p 8001:8001 -v $(pwd)/data:/app/data --env-file .env vulnscan-mcp:latest
@@ -93,13 +99,51 @@ docker run -d -p 8001:8001 -v $(pwd)/data:/app/data --env-file .env vulnscan-mcp
 
 Connect to: `http://localhost:8001/sse`
 
+### ChatGPT / OpenAI (Streamable HTTP)
+
+The server supports [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) transport at the `/mcp` endpoint, which is the protocol used by ChatGPT and the OpenAI Responses API.
+
+**ChatGPT Plugin:**
+
+Add as a remote MCP server in ChatGPT settings using the URL:
+
+```
+https://your-domain.com/mcp
+```
+
+**OpenAI Responses API:**
+
+```python
+from openai import OpenAI
+
+client = OpenAI()
+
+resp = client.responses.create(
+    model="gpt-4o",
+    tools=[
+        {
+            "type": "mcp",
+            "server_label": "vulnscan",
+            "server_description": "Vulnerability Intelligence MCP Server",
+            "server_url": "https://your-domain.com/mcp",
+            "require_approval": "never",
+        },
+    ],
+    input="What are the latest critical CVEs from the past 7 days?",
+)
+
+print(resp.output_text)
+```
+
+> **Note:** ChatGPT requires your server to be reachable over HTTPS. For local/private servers, use [OpenAI's Secure MCP Tunnel](https://platform.openai.com/api/docs/guides/secure-mcp-tunnels) to expose your server without making it publicly accessible.
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NVD_API_KEY` | — | NVD API key for higher rate limits |
-| `MCP_TRANSPORT` | `sse` | Transport: `stdio` or `sse` |
-| `MCP_PORT` | `8001` | SSE server port |
+| `MCP_TRANSPORT` | `sse` | Transport: `stdio`, `sse`, `http`, or `streamable-http` |
+| `MCP_PORT` | `8001` | Network server port (serves both SSE and Streamable HTTP) |
 | `NVD_SYNC_INTERVAL_HOURS` | `2` | NVD delta sync interval |
 | `KEV_SYNC_INTERVAL_HOURS` | `12` | CISA KEV sync interval |
 | `EPSS_SYNC_INTERVAL_HOURS` | `24` | EPSS batch enrichment interval |
