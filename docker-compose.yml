@@ -1,0 +1,22 @@
+services:
+  vulnscan-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vulnscan-mcp
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data:rw
+      - ./.env:/app/.env:ro
+    environment:
+      - NVD_API_KEY=${NVD_API_KEY}
+      - DATA_DIR=/app/data
+      - MCP_TRANSPORT=sse
+      - MCP_PORT=8001
+      - MCP_HOST=0.0.0.0
+      - NVD_SYNC_INTERVAL_HOURS=2
+      - KEV_SYNC_INTERVAL_HOURS=12
+      - EPSS_SYNC_INTERVAL_HOURS=24
+      - LOG_LEVEL=INFO
