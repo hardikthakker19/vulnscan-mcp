@@ -11,6 +11,7 @@ services:
       - ./data:/app/data:rw
       - ./.env:/app/.env:ro
     environment:
+      - TZ=${TZ:-Asia/Kolkata}
       - NVD_API_KEY=${NVD_API_KEY}
       - DATA_DIR=/app/data
       - MCP_TRANSPORT=sse

@@ -36,7 +36,8 @@ RUN mkdir -p /app/data && chown -R appuser:appuser /app/data
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    DATA_DIR="/app/data"
+    DATA_DIR="/app/data" \
+    TZ="Asia/Kolkata"
 
 USER appuser
 
