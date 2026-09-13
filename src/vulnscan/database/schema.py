@@ -1,10 +1,8 @@
-"""Database schema creation, FTS5 triggers, and data migration."""
+"""Database schema creation and FTS5 triggers."""
 
 from __future__ import annotations
 
 import logging
-
-import aiosqlite
 
 from vulnscan.database.connection import get_connection
 
@@ -115,72 +113,9 @@ CREATE TRIGGER IF NOT EXISTS cves_au AFTER UPDATE ON cves BEGIN
 END;
 """
 
-# ─── Migration from legacy 'vulnerabilities' table ──────────────────────────
-
-MIGRATION_SQL = """
-INSERT OR IGNORE INTO cves (
-    cve_id, description, cvss_v3_score, cvss_v3_vector,
-    severity, published_date, last_modified_date,
-    references_json, cpe_match_json
-)
-SELECT
-    cve_id,
-    COALESCE(description, ''),
-    cvss_score,
-    cvss_vector,
-    severity,
-    COALESCE(published_date, datetime('now')),
-    COALESCE(last_modified_date, datetime('now')),
-    references_json,
-    affected_products
-FROM vulnerabilities
-WHERE cve_id IS NOT NULL;
-"""
-
-MIGRATE_KEV_SQL = """
-INSERT OR IGNORE INTO cisa_kev (cve_id, date_added, due_date)
-SELECT cve_id, created_at, kev_due_date
-FROM vulnerabilities
-WHERE is_in_kev = 1 AND cve_id IS NOT NULL;
-"""
-
-
-# Legacy tables from older database versions to drop
-LEGACY_TABLES_TO_DROP = [
-    "alerts",
-    "components",
-    "scan_results",
-    "scan_runs",
-    "schema_migrations",
-    "vulnerabilities",
-]
-
-
-async def _table_exists(conn: aiosqlite.Connection, table_name: str) -> bool:
-    """Check if a table exists in the database."""
-    cursor = await conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table_name,),
-    )
-    row = await cursor.fetchone()
-    return row is not None
-
-
-async def _rebuild_fts_index(conn: aiosqlite.Connection) -> None:
-    """Populate FTS5 index from existing cves data."""
-    logger.info("Rebuilding FTS5 index from cves table...")
-    await conn.execute("INSERT INTO cves_fts(cves_fts) VALUES('rebuild')")
-    await conn.commit()
-    logger.info("FTS5 index rebuilt successfully")
-
-
 async def initialize_schema() -> None:
-    """Create all tables, FTS5 index, triggers, and migrate legacy data."""
+    """Create all tables, FTS5 index, triggers, and default sync state."""
     conn = await get_connection()
-
-    # Check if this is first run with the new schema
-    cves_existed = await _table_exists(conn, "cves")
-    has_legacy = await _table_exists(conn, "vulnerabilities")
 
     # Create core tables and indexes
     logger.info("Creating database schema...")
@@ -202,39 +137,6 @@ async def initialize_schema() -> None:
         if statement:
             await conn.execute(statement + "END;")
     await conn.commit()
-
-    # Migrate legacy data if needed
-    if has_legacy and not cves_existed:
-        logger.info("Migrating data from legacy 'vulnerabilities' table...")
-        cursor = await conn.execute("SELECT COUNT(*) FROM vulnerabilities")
-        row = await cursor.fetchone()
-        legacy_count = row[0] if row else 0
-        logger.info(f"Found {legacy_count} records in legacy table")
-
-        await conn.execute(MIGRATION_SQL)
-        await conn.execute(MIGRATE_KEV_SQL)
-        await conn.commit()
-
-        cursor = await conn.execute("SELECT COUNT(*) FROM cves")
-        row = await cursor.fetchone()
-        migrated_count = row[0] if row else 0
-        logger.info(f"Migrated {migrated_count} CVE records to new schema")
-
-        # Rebuild FTS index after migration
-        await _rebuild_fts_index(conn)
-    elif not cves_existed:
-        logger.info("Fresh database — no legacy data to migrate")
-
-    # Drop obsolete legacy tables if they exist
-    dropped_legacy = []
-    for table_name in LEGACY_TABLES_TO_DROP:
-        if await _table_exists(conn, table_name):
-            logger.info(f"Dropping obsolete legacy table: {table_name}")
-            await conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-            dropped_legacy.append(table_name)
-    if dropped_legacy:
-        await conn.commit()
-        logger.info(f"Cleaned up legacy tables: {', '.join(dropped_legacy)}")
 
     # Initialize sync_state entries
     await conn.execute("""
