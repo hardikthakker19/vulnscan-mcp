@@ -237,59 +237,36 @@ def _format_cve_detail(row: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-async def _enrich_missing_cpes(cve_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """Fetch and cache affected version details on-demand from NVD API for CVEs with missing CPE data."""
+async def _enrich_from_nvd(cve_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Fetch full CVE details on-demand from NVD API for CVEs with missing CVSS or CPE data, and update DB."""
     enriched: dict[str, dict[str, Any]] = {}
     if not cve_ids:
         return enriched
 
     client = NVDClient()
-    conn = await get_connection()
     try:
         for cve_id in cve_ids:
             try:
-                data = await client.get(params={"cveId": cve_id})
-                vulns = data.get("vulnerabilities", []) if isinstance(data, dict) else []
-                if vulns:
-                    cve = vulns[0].get("cve", {})
-                    configs = cve.get("configurations", [])
-                    cpe_matches = []
-                    for config in configs:
-                        for node in config.get("nodes", []):
-                            for match in node.get("cpeMatch", []):
-                                if match.get("vulnerable"):
-                                    criteria = match.get("criteria", "")
-                                    entry: dict[str, Any] = {"criteria": criteria}
-                                    parts = criteria.split(":")
-                                    if len(parts) >= 5:
-                                        entry["vendor"] = parts[3]
-                                        entry["product"] = parts[4]
-                                        if len(parts) > 5 and parts[5] not in ("*", "-"):
-                                            entry["version"] = parts[5]
-                                    for k in (
-                                        "versionStartIncluding",
-                                        "versionStartExcluding",
-                                        "versionEndIncluding",
-                                        "versionEndExcluding",
-                                    ):
-                                        if match.get(k):
-                                            entry[k] = match[k]
-                                    cpe_matches.append(entry)
+                results = await client.search_cves(cve_id=cve_id)
+                if results:
+                    cve_data = results[0]
+                    # Persist all NVD data (CVSS v3/v4, severity, vectors, CPEs, CWEs, refs) to DB
+                    await queries.upsert_cves([cve_data])
 
-                    if cpe_matches:
-                        raw_json = json.dumps(cpe_matches)
-                        await conn.execute(
-                            "UPDATE cves SET cpe_match_json = ? WHERE cve_id = ?",
-                            (raw_json, cve_id),
-                        )
-                        versions, products = _parse_affected_products_and_versions(raw_json)
-                        enriched[cve_id] = {
-                            "versions": versions,
-                            "products": products,
-                        }
+                    versions, products = _parse_affected_products_and_versions(
+                        cve_data.get("cpe_match_json")
+                    )
+                    enriched[cve_id] = {
+                        "cvss_v3_score": cve_data.get("cvss_v3_score"),
+                        "cvss_v3_vector": cve_data.get("cvss_v3_vector"),
+                        "cvss_v4_score": cve_data.get("cvss_v4_score"),
+                        "cvss_v4_vector": cve_data.get("cvss_v4_vector"),
+                        "severity": cve_data.get("severity"),
+                        "versions": versions,
+                        "products": products,
+                    }
             except Exception as e:
-                logger.debug(f"Failed to fetch CPE for {cve_id} from NVD: {e}")
-        await conn.commit()
+                logger.debug(f"Failed to fetch on-demand NVD data for {cve_id}: {e}")
     finally:
         await client.close()
 
@@ -316,23 +293,33 @@ async def search_vulnerabilities(
 
     results = [_format_cve_summary(row) for row in rows]
 
-    # For any search results missing affected versions, attempt quick on-demand NVD enrichment
+    # For any search results missing CVSS scores or affected versions, attempt quick on-demand NVD enrichment
     missing_cves = [
         r["cve_id"]
         for r in results
-        if not r.get("affected_versions") and r.get("cve_id")
+        if (r.get("cvss_v3_score") is None or not r.get("affected_versions")) and r.get("cve_id")
     ]
     if missing_cves:
         try:
-            enriched = await _enrich_missing_cpes(missing_cves[:5])
+            enriched = await _enrich_from_nvd(missing_cves[:10])
             for r in results:
                 cid = r.get("cve_id")
                 if cid in enriched:
-                    r["affected_versions"] = enriched[cid]["versions"]
-                    if enriched[cid]["products"]:
-                        r["affected_products"] = enriched[cid]["products"]
+                    data = enriched[cid]
+                    if data.get("cvss_v3_score") is not None:
+                        r["cvss_v3_score"] = data["cvss_v3_score"]
+                        r["cvss_v3_vector"] = data.get("cvss_v3_vector")
+                    if data.get("cvss_v4_score") is not None:
+                        r["cvss_v4_score"] = data["cvss_v4_score"]
+                        r["cvss_v4_vector"] = data.get("cvss_v4_vector")
+                    if data.get("severity"):
+                        r["severity"] = data["severity"]
+                    if data.get("versions"):
+                        r["affected_versions"] = data["versions"]
+                    if data.get("products"):
+                        r["affected_products"] = data["products"]
         except Exception as e:
-            logger.debug(f"On-demand CPE enrichment error: {e}")
+            logger.debug(f"On-demand NVD enrichment error: {e}")
 
     return {
         "total_results": len(results),
@@ -351,23 +338,35 @@ async def get_cve_details(cve_id: str) -> dict[str, Any]:
     """Get comprehensive details for a specific CVE."""
     row = await queries.get_cve_by_id(cve_id)
 
+    if not row or (row.get("cvss_v3_score") is None and not row.get("raw_nvd_json")):
+        # On-demand fetch from NVD API if not in local DB or if present only as a stub
+        client = NVDClient()
+        try:
+            nvd_results = await client.search_cves(cve_id=cve_id)
+            if nvd_results:
+                await queries.upsert_cves(nvd_results)
+                row = await queries.get_cve_by_id(cve_id)
+        except Exception as e:
+            logger.debug(f"Failed to fetch {cve_id} on-demand from NVD: {e}")
+        finally:
+            await client.close()
+
     if not row:
-        # Try fetching from EPSS on-demand if not in local DB
         return {
-            "error": f"CVE {cve_id} not found in local database",
-            "suggestion": "The CVE may not have been synced yet. Try again after the next sync cycle.",
+            "error": f"CVE {cve_id} not found in local database or NVD",
+            "suggestion": "The CVE may not have been published yet or is invalid.",
         }
 
     detail = _format_cve_detail(row)
     if not detail.get("affected_versions"):
         try:
-            enriched = await _enrich_missing_cpes([cve_id])
+            enriched = await _enrich_from_nvd([cve_id])
             if cve_id in enriched:
                 detail["affected_versions"] = enriched[cve_id]["versions"]
                 if enriched[cve_id]["products"]:
                     detail["affected_products"] = enriched[cve_id]["products"]
         except Exception as e:
-            logger.debug(f"On-demand CPE enrichment error for {cve_id}: {e}")
+            logger.debug(f"On-demand enrichment error for {cve_id}: {e}")
 
     return detail
 
