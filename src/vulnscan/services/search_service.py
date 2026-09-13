@@ -105,8 +105,10 @@ def _format_cve_summary(row: dict[str, Any]) -> dict[str, Any]:
         row.get("cpe_match_json")
     )
 
+    cve_id = row.get("cve_id")
     result = {
-        "cve_id": row.get("cve_id"),
+        "cve_id": cve_id,
+        "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}" if cve_id else None,
         "description": row.get("description", "")[:500],
         "severity": row.get("severity"),
         "cvss_v3_score": row.get("cvss_v3_score"),
@@ -404,8 +406,10 @@ async def get_top_kevs(
 
     results = []
     for row in rows:
+        cve_id = row.get("cve_id")
         entry = {
-            "cve_id": row.get("cve_id"),
+            "cve_id": cve_id,
+            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}" if cve_id else None,
             "vendor_project": row.get("vendor_project"),
             "product": row.get("product"),
             "vulnerability_name": row.get("vulnerability_name"),
@@ -459,8 +463,10 @@ async def get_epss_scores(cve_ids: list[str]) -> dict[str, Any]:
     # Combine results
     all_scores = {}
     for r in cached:
-        all_scores[r["cve_id"]] = {
-            "cve_id": r["cve_id"],
+        cid = r["cve_id"]
+        all_scores[cid] = {
+            "cve_id": cid,
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}",
             "epss_score": r["epss_score"],
             "percentile": r["percentile"],
             "severity": r.get("severity"),
@@ -469,9 +475,11 @@ async def get_epss_scores(cve_ids: list[str]) -> dict[str, Any]:
         }
 
     for r in api_results:
-        if r["cve_id"] not in all_scores:
-            all_scores[r["cve_id"]] = {
-                "cve_id": r["cve_id"],
+        cid = r["cve_id"]
+        if cid not in all_scores:
+            all_scores[cid] = {
+                "cve_id": cid,
+                "url": f"https://nvd.nist.gov/vuln/detail/{cid}",
                 "epss_score": r["epss_score"],
                 "percentile": r["percentile"],
                 "date_recorded": r.get("date_recorded"),
@@ -483,6 +491,7 @@ async def get_epss_scores(cve_ids: list[str]) -> dict[str, Any]:
         if cid not in all_scores:
             all_scores[cid] = {
                 "cve_id": cid,
+                "url": f"https://nvd.nist.gov/vuln/detail/{cid}",
                 "epss_score": None,
                 "error": "Score not available",
             }
